@@ -52,7 +52,7 @@ const BG_COLOR = '#1a1012';
 
 // In fullscreen: each half-bar is capped at this ratio of screen height.
 // 0.35 = bars reach up to 35% above and below centre. Raise to taste.
-const FULLSCREEN_MAX_BAR_RATIO = 0.90;
+const FULLSCREEN_MAX_BAR_RATIO = 0.70;
 
 // FFT size — higher = more frequency resolution, must be a power of 2.
 // 4096 gives 2048 frequency bins. Lower (e.g. 2048) is snappier but less detailed.
@@ -127,10 +127,13 @@ function getBarNorm(barIndex, numBars, dataArray, sensitivity) {
 
   // Logarithmic mapping: bar 0 covers the lowest frequencies,
   // bar numBars-1 covers the highest. Log scale gives more bars to bass/mids.
+  // MIN_BIN skips the lowest FFT bins which are sub-bass (inaudible on most
+  // speakers/mics). 8–20 is a good range. Raise if centre bars are still quiet.
+  const MIN_BIN = 4;
   const tLo = barIndex / numBars;
   const tHi = (barIndex + 1) / numBars;
-  const lo  = Math.floor(Math.pow(binCount, tLo) - 1);
-  const hi  = Math.ceil(Math.pow(binCount, tHi) - 1);
+  const lo  = MIN_BIN + Math.floor((binCount - MIN_BIN) * (Math.pow(binCount, tLo) - 1) / (binCount - 1));
+  const hi  = MIN_BIN + Math.ceil((binCount - MIN_BIN)  * (Math.pow(binCount, tHi) - 1) / (binCount - 1));
 
   let sum = 0, count = 0;
   for (let b = lo; b <= Math.min(hi, binCount - 1); b++) {
