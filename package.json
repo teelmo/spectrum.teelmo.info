@@ -1,0 +1,17 @@
+{
+  "name": "spectrum.teelmo.info",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.html",
+  "scripts": {
+    "push": "git push",
+    "sync-gh-pages": "git subtree push --prefix public origin gh-pages"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+  },
+  "dependencies": {
+  }
+}
