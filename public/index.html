@@ -54,7 +54,7 @@ const BG_COLOR = '#1a1012';
 // In fullscreen: bars grow up from the vertical centre.
 // This ratio caps how tall they can get — 0.35 means 35% of screen height,
 // so the total band (above centre) is 35% of the screen. Raise to taste.
-const FULLSCREEN_MAX_BAR_RATIO = 0.35;
+const FULLSCREEN_MAX_BAR_RATIO = 0.60;
 
 // FFT size — higher = more frequency resolution, must be a power of 2.
 // 4096 gives 2048 frequency bins. Lower (e.g. 2048) is snappier but less detailed.
@@ -141,7 +141,7 @@ function drawBars(dataArray) {
   // Fullscreen: bars grow from vertical centre, capped by FULLSCREEN_MAX_BAR_RATIO.
   // Embedded: bars grow from the bottom of the canvas.
   const maxBarH = isFullscreen() ? h * FULLSCREEN_MAX_BAR_RATIO : h - 12;
-  const baseline = isFullscreen() ? h *0.65 : h;
+  const baseline = isFullscreen() ? h * 0.8 : h;
 
   const binCount = dataArray ? dataArray.length : 0;
 
