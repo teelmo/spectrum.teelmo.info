@@ -3,20 +3,21 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   #vis-wrap { padding: 1.5rem 0; }
   #controls { display: flex; flex-direction: row; gap: 12px; margin-bottom: 1.25rem; flex-wrap: wrap; margin: 0 10px; }
-  button { background-color:#1a1012 ;margin: 20px 10; padding: 8px 10px; font-size: 13px; font-weight: 500; cursor: pointer; color: #fff; transition: background 0.15s; }
+  button { background-color:#1a1012; margin: 20px 0; padding: 8px 10px; font-size: 13px; font-weight: 500; cursor: pointer; color: #fff; transition: background 0.15s; border: 0.5px solid #444; }
   button:hover { background: #666; }
   button.active { background: #3a1010; color: #F09595; border-color: #993C1D; }
-  .ctrl { display: flex; align-items: center; gap: 8px; font-size: 13px; width: 30%; }
+  .ctrl { display: flex; align-items: center; gap: 8px; font-size: 13px; width: 30%; color: #aaa; }
+  .ctrl label { min-width: 90px; color: #222; text-align: right; }
   .ctrl input[type=range] { width: 90px; }
-  .ctrl span { min-width: 32px; font-weight: 500; }
+  .ctrl span { min-width: 36px; font-weight: 500; color: #222 ; }
   #canvas-wrap { position: relative; overflow: hidden; background: #1a1012; }
-  canvas { display: block; width: 100%; height: 600px; }
-  #canvas-wrap:-webkit-full-screen { border-radius: 0; width: 100vw; height: 100vh; }
+  canvas { display: block; width: 100%; height: 400px; }
+  #canvas-wrap:-webkit-full-screen { width: 100vw; height: 100vh; }
   #canvas-wrap:-webkit-full-screen canvas { width: 100%; height: 100%; }
-  #canvas-wrap:fullscreen { border-radius: 0; width: 100vw; height: 100vh; }
+  #canvas-wrap:fullscreen { width: 100vw; height: 100vh; }
   #canvas-wrap:fullscreen canvas { width: 100%; height: 100%; }
-  #canvas-wrap:-webkit-full-screen #fs-btn-overlay { display: none }
-  #canvas-wrap:fullscreen #fs-btn-overlay { display: none }
+  #canvas-wrap:-webkit-full-screen #fs-btn-overlay { display: none; }
+  #canvas-wrap:fullscreen #fs-btn-overlay { display: none; }
   #fs-btn-overlay { position: absolute; bottom: 12px; right: 12px; background: rgba(255,255,255,0.08); border: 0.5px solid rgba(255,255,255,0.15); color: #ccc; font-size: 12px; padding: 5px 10px; cursor: pointer; transition: background 0.15s; z-index: 10; }
   #fs-btn-overlay:hover { background: rgba(255,255,255,0.15); }
 </style>
@@ -24,7 +25,7 @@
 <div id="vis-wrap">
   <div id="controls">
     <div class="ctrl">
-      <label for="bars">Number of bars</label>
+      <label for="bars">Bars</label>
       <input type="range" id="bars" min="16" max="128" step="8" value="96">
       <span id="bars-out">96</span>
     </div>
@@ -40,8 +41,8 @@
     </div>
     <div class="ctrl">
       <label for="sens">Sensitivity</label>
-      <input type="range" id="sens" min="0.1" max="6" step="0.1" value="1.5">
-      <span id="sens-out">1.5×</span>
+      <input type="range" id="sens" min="0.1" max="6" step="0.1" value="1.2">
+      <span id="sens-out">1.2×</span>
     </div>
     <div class="ctrl">
       <label for="smooth">Smoothing</label>
@@ -73,40 +74,46 @@ const BG_COLOR = '#1a1012';
 // 4096 gives 2048 frequency bins. Lower (e.g. 2048) is snappier but less detailed.
 const FFT_SIZE = 4096;
 
+// How fast peak indicators fall — lower = slower. Good range: 0.003–0.015.
+const PEAK_DROP_RATE = 0.007;
+
+// Peaks below this normalised level are hidden to avoid clutter during silence.
+const PEAK_MIN_NORM = 0.04;
+
 // ─── ELEMENT REFERENCES ─────────────────────────────────────────────────────
 
-const btn       = document.getElementById('start-btn');
-const canvas    = document.getElementById('cv');
-const ctx2d     = canvas.getContext('2d');
-const wrap      = document.getElementById('canvas-wrap');
+const btn          = document.getElementById('start-btn');
+const canvas       = document.getElementById('cv');
+const ctx2d        = canvas.getContext('2d');
+const wrap         = document.getElementById('canvas-wrap');
 
 const sensSlider   = document.getElementById('sens');
 const smoothSlider = document.getElementById('smooth');
 const barsSlider   = document.getElementById('bars');
+const maxbarSlider = document.getElementById('maxbar');
+const minbinSlider = document.getElementById('minbin');
+const noiseSlider  = document.getElementById('noise');
+
 const sensOut      = document.getElementById('sens-out');
 const smoothOut    = document.getElementById('smooth-out');
 const barsOut      = document.getElementById('bars-out');
-const maxbarSlider = document.getElementById('maxbar');
-const minbinSlider = document.getElementById('minbin');
 const maxbarOut    = document.getElementById('maxbar-out');
 const minbinOut    = document.getElementById('minbin-out');
-const noiseSlider = document.getElementById('noise');
-const noiseOut    = document.getElementById('noise-out');
+const noiseOut     = document.getElementById('noise-out');
 
 // ─── SLIDER LABELS ──────────────────────────────────────────────────────────
 
-sensSlider.oninput = () => sensOut.textContent = parseFloat(sensSlider.value).toFixed(1) + '×';
+sensSlider.oninput   = () => sensOut.textContent   = parseFloat(sensSlider.value).toFixed(1) + '×';
+barsSlider.oninput   = () => barsOut.textContent   = barsSlider.value;
+maxbarSlider.oninput = () => maxbarOut.textContent = parseFloat(maxbarSlider.value).toFixed(2);
+minbinSlider.oninput = () => minbinOut.textContent = minbinSlider.value;
+noiseSlider.oninput  = () => noiseOut.textContent  = noiseSlider.value;
 
 smoothSlider.oninput = () => {
   smoothOut.textContent = parseFloat(smoothSlider.value).toFixed(2);
+  // Apply live without restarting audio
   if (analyser) analyser.smoothingTimeConstant = parseFloat(smoothSlider.value);
 };
-
-barsSlider.oninput = () => barsOut.textContent = barsSlider.value;
-
-maxbarSlider.oninput = () => maxbarOut.textContent = parseFloat(maxbarSlider.value).toFixed(2);
-minbinSlider.oninput = () => minbinOut.textContent = minbinSlider.value;
-noiseSlider.oninput = () => noiseOut.textContent = noiseSlider.value;
 
 // ─── FULLSCREEN ──────────────────────────────────────────────────────────────
 
@@ -128,14 +135,14 @@ document.getElementById('fs-btn-overlay').onclick = goFullscreen;
 
 let audioCtx, analyser, source, animId, running = false;
 
-// Stores the current peak height (0–1) for each bar, for the falling peak indicators.
+// Stores the current peak height (0–1) for each bar
 let peaks = [];
 
 // ─── CANVAS SIZING ───────────────────────────────────────────────────────────
 
 function resizeCanvas() {
   canvas.width  = wrap.offsetWidth;
-  canvas.height = isFullscreen() ? wrap.offsetHeight : 600;
+  canvas.height = isFullscreen() ? wrap.offsetHeight : 400;
 }
 
 document.addEventListener('fullscreenchange', resizeCanvas);
@@ -144,20 +151,20 @@ window.addEventListener('resize', resizeCanvas);
 
 // ─── FREQUENCY → NORM ────────────────────────────────────────────────────────
 
-// Given a bar index (0 = bass, higher = treble) and the full FFT data array,
-// returns a normalised loudness value 0–1 for that frequency band.
+// Returns a normalised loudness 0–1 for bar at barIndex.
+// sensitivity is passed in so this works for both smoothed and raw data.
 function getBarNorm(barIndex, numBars, dataArray, sensitivity) {
   const binCount = dataArray.length;
 
-  // Logarithmic mapping: bar 0 covers the lowest frequencies,
-  // bar numBars-1 covers the highest. Log scale gives more bars to bass/mids.
-  // MIN_BIN skips the lowest FFT bins which are sub-bass (inaudible on most
-  // speakers/mics). 8–20 is a good range. Raise if centre bars are still quiet.
+  // MIN_BIN: skips sub-bass bins that most mics/speakers can't reproduce.
+  // Controlled by the Low cut slider.
   const MIN_BIN = parseInt(minbinSlider.value);
+
+  // Logarithmic mapping so bass/mids get more bars than treble
   const tLo = barIndex / numBars;
   const tHi = (barIndex + 1) / numBars;
   const lo  = MIN_BIN + Math.floor((binCount - MIN_BIN) * (Math.pow(binCount, tLo) - 1) / (binCount - 1));
-  const hi  = MIN_BIN + Math.ceil((binCount - MIN_BIN)  * (Math.pow(binCount, tHi) - 1) / (binCount - 1));
+  const hi  = MIN_BIN + Math.ceil( (binCount - MIN_BIN) * (Math.pow(binCount, tHi) - 1) / (binCount - 1));
 
   let sum = 0, count = 0;
   for (let b = lo; b <= Math.min(hi, binCount - 1); b++) {
@@ -167,42 +174,42 @@ function getBarNorm(barIndex, numBars, dataArray, sensitivity) {
   const avg = count ? sum / count : 0;
 
   // Subtract noise floor, rescale remaining range to 0–1, apply sensitivity
-  const signal = Math.max(0, avg - parseInt(noiseSlider.value)) / (255 - parseInt(noiseSlider.value));
+  const noiseFloor = parseInt(noiseSlider.value);
+  const signal = Math.max(0, avg - noiseFloor) / (255 - noiseFloor);
   return Math.min(signal * sensitivity, 1);
 }
 
 // ─── DRAW A SINGLE BAR ───────────────────────────────────────────────────────
 
-// Draws one vertical bar (growing up and down from baseline) at pixel position x.
+// Draws one bar growing up and down symmetrically from baseline.
 function drawBar(x, barW, baseline, maxBarH, norm) {
-  const halfH = Math.max(2, norm * maxBarH);
-  const yTop  = baseline - halfH;
+  const halfH  = Math.max(2, norm * maxBarH);
+  const yTop   = baseline - halfH;
+  const radius = Math.min(3, barW / 2);
 
-  // Gradient: bright tips fading to a dark root at the centre line
+  // Gradient: bright tips → dark root at centre line
   const grad = ctx2d.createLinearGradient(0, yTop, 0, baseline + halfH);
   grad.addColorStop(0,   `rgba(240, 90, 70, ${0.5 + norm * 0.5})`); // bright top tip
   grad.addColorStop(0.5, `rgba(100, 15, 15, 0.8)`);                 // dark centre root
   grad.addColorStop(1,   `rgba(240, 90, 70, ${0.5 + norm * 0.5})`); // bright bottom tip
   ctx2d.fillStyle = grad;
 
-  const radius = Math.min(3, barW / 2);
-
-  // Upper half
+  // Upper half (centre → up)
   ctx2d.beginPath();
   ctx2d.roundRect(x, yTop, barW, halfH, radius);
   ctx2d.fill();
 
-  // Lower half (mirrored below baseline)
+  // Lower half (centre → down, mirror of upper)
   ctx2d.beginPath();
   ctx2d.roundRect(x, baseline, barW, halfH, radius);
   ctx2d.fill();
-
-  
 }
 
 // ─── DRAWING ─────────────────────────────────────────────────────────────────
 
-function drawBars(dataArray) {
+// dataArray: smoothed FFT data for bar heights (or null for idle)
+// rawArray:  unsmoothed FFT data for peak snapping (or null for idle)
+function drawBars(dataArray, rawArray) {
   resizeCanvas();
   const w = canvas.width;
   const h = canvas.height;
@@ -210,43 +217,39 @@ function drawBars(dataArray) {
   ctx2d.fillStyle = BG_COLOR;
   ctx2d.fillRect(0, 0, w, h);
 
-  const numBars     = dataArray ? parseInt(barsSlider.value) : 64;
+  const numBars     = parseInt(barsSlider.value);
   const sensitivity = parseFloat(sensSlider.value);
   const gap         = numBars > 80 ? 2 : 3;
   const barW        = Math.max(1, (w - gap * (numBars - 1)) / numBars);
-  const maxBarH = isFullscreen() ? h * parseFloat(maxbarSlider.value) / 2 : (h - 12) / 2;
-  const baseline    = isFullscreen() ? h * 0.5 : h * 0.5;
 
-  // ── Centred spectrum layout ──────────────────────────────────────────────
-  // Bar 0 (bass) sits in the horizontal centre of the canvas.
-  // Bars are then placed in pairs: one stepping left, one stepping right.
-  // This means the left half mirrors the right half, both going bass→treble outward.
-  //
-  // With an even numBars, the centre two bars share the middle.
-  // The total number of unique frequency bands drawn is still numBars.
+  // maxBarH: how tall each half-bar can grow in pixels.
+  // Controlled by Bar height slider (both in fullscreen and embedded).
+  const maxBarH  = h * parseFloat(maxbarSlider.value) / 2;
+  const baseline = h * 0.5; // bars always grow from vertical centre
 
-  const half = Math.floor(numBars / 2);  // number of bars on each side
-  const centreX = w / 2;                 // horizontal centre of canvas
+  const half    = Math.floor(numBars / 2); // bars on each side
+  const centreX = w / 2;
 
   for (let i = 0; i < half; i++) {
+    // Smoothed norm drives the bar height (looks fluid)
     const norm = dataArray ? getBarNorm(i, half, dataArray, sensitivity) : 0;
 
-    // Right side: bar i steps rightward from centre
+    // Right side: steps rightward from centre
     const xRight = centreX + i * (barW + gap) + gap / 2;
     drawBar(xRight, barW, baseline, maxBarH, norm);
 
-    // Left side: bar i steps leftward from centre (mirror)
+    // Left side: steps leftward from centre (mirror)
     const xLeft = centreX - (i + 1) * (barW + gap) + gap / 2;
     drawBar(xLeft, barW, baseline, maxBarH, norm);
 
-    // ── Falling peak indicators ────────────────────────────────────────────
-    // Peak snaps up instantly when norm exceeds it, then falls slowly each frame.
-    const PEAK_DROP_RATE = 0.007; // lower = slower fall. Try 0.008–0.02.
-    const PEAK_MIN_NORM  = 0.04;  // peaks below this are hidden at silence.
+    // ── Falling peak indicators ──────────────────────────────────────────
+    // Raw (unsmoothed) norm drives peak snapping so peaks react instantly,
+    // then fall independently of the smoothed bars beneath.
+    const rawNorm = rawArray ? getBarNorm(i, half, rawArray, sensitivity) : 0;
 
     if (!peaks[i]) peaks[i] = 0;
-    if (norm > peaks[i]) {
-      peaks[i] = norm;                              // snap up instantly
+    if (rawNorm > peaks[i]) {
+      peaks[i] = rawNorm;                              // snap up instantly
     } else {
       peaks[i] = Math.max(0, peaks[i] - PEAK_DROP_RATE); // fall slowly
     }
@@ -255,8 +258,8 @@ function drawBars(dataArray) {
       const peakH  = peaks[i] * maxBarH;
       const capH   = 3;
       const radius = Math.min(3, barW / 2);
-      ctx2d.fillStyle = `rgba(255, 140, 120, ${(norm + 0.2) * 1})`;
-      // ctx2d.fillStyle = `rgba(255, 180, 150, 0.9)`;
+      ctx2d.fillStyle = `rgba(240, 90, 70, 0.9)`;
+
       // Top cap — right side
       ctx2d.beginPath();
       ctx2d.roundRect(xRight, baseline - peakH - capH, barW, capH, radius);
@@ -281,9 +284,18 @@ function drawBars(dataArray) {
 
 function loop() {
   if (!running) return;
+
+  // Smoothed data — used for bar heights (fluid movement)
   const dataArray = new Uint8Array(analyser.frequencyBinCount);
   analyser.getByteFrequencyData(dataArray);
-  drawBars(dataArray);
+
+  // Unsmoothed data — used for peak snapping (instant reaction)
+  analyser.smoothingTimeConstant = 0;
+  const rawArray = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(rawArray);
+  analyser.smoothingTimeConstant = parseFloat(smoothSlider.value); // restore
+
+  drawBars(dataArray, rawArray);
   animId = requestAnimationFrame(loop);
 }
 
@@ -297,8 +309,8 @@ async function start() {
     if (audioCtx) audioCtx.close();
     btn.textContent = 'Start microphone';
     btn.classList.remove('active');
-    drawBars(null);
     peaks = [];
+    drawBars(null, null);
     return;
   }
 
@@ -309,7 +321,7 @@ async function start() {
     analyser.fftSize = FFT_SIZE;
     analyser.smoothingTimeConstant = parseFloat(smoothSlider.value);
     source = audioCtx.createMediaStreamSource(stream);
-    source.connect(analyser);
+    source.connect(analyser); // not connected to destination — no playback/feedback
     running = true;
     btn.textContent = 'Stop microphone';
     btn.classList.add('active');
@@ -318,5 +330,5 @@ async function start() {
 }
 
 btn.onclick = start;
-drawBars(null);
+drawBars(null, null);
 </script>
