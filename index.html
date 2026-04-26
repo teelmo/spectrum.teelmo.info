@@ -1,0 +1,252 @@
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  #vis-wrap { padding: 1.5rem 0; font-family: var(--font-sans); }
+  #controls { display: flex; align-items: center; gap: 12px; margin-bottom: 1.25rem; flex-wrap: wrap; }
+  button { padding: 8px 18px; font-size: 13px; font-weight: 500; border-radius: var(--border-radius-md); cursor: pointer; border: 0.5px solid var(--color-border-secondary); background: var(--color-background-primary); color: var(--color-text-primary); transition: background 0.15s; }
+  button:hover { background: var(--color-background-secondary); }
+  button.active { background: #3a1010; color: #F09595; border-color: #993C1D; }
+  .ctrl { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--color-text-secondary); }
+  .ctrl input[type=range] { width: 200px; }
+  .ctrl span { min-width: 32px; font-weight: 500; color: var(--color-text-primary); }
+  #status { font-size: 13px; color: var(--color-text-secondary); margin-bottom: 12px; min-height: 18px; }
+  #canvas-wrap { position: relative; border-radius: var(--border-radius-md); overflow: hidden; background: #1a1012; }
+  canvas { display: block; width: 100%; height: 600px; }
+  #canvas-wrap:-webkit-full-screen { border-radius: 0; width: 100vw; height: 100vh; }
+  #canvas-wrap:-webkit-full-screen canvas { width: 100%; height: 100%; }
+  #canvas-wrap:fullscreen { border-radius: 0; width: 100vw; height: 100vh; }
+  #canvas-wrap:fullscreen canvas { width: 100%; height: 100%; }
+  #fs-btn-overlay { position: absolute; bottom: 12px; right: 12px; background: rgba(255,255,255,0.08); border: 0.5px solid rgba(255,255,255,0.15); color: #ccc; font-size: 12px; padding: 5px 10px; border-radius: var(--border-radius-md); cursor: pointer; transition: background 0.15s; z-index: 10; }
+  #fs-btn-overlay:hover { background: rgba(255,255,255,0.15); }
+</style>
+
+<div id="vis-wrap">
+  <div id="controls">
+    <button id="start-btn">Start microphone</button>
+    <div class="ctrl">
+      <label for="sens">Sensitivity</label>
+      <input type="range" id="sens" min="0.5" max="6" step="0.1" value="1.5">
+      <span id="sens-out">1.5×</span>
+    </div>
+    <div class="ctrl">
+      <label for="smooth">Smoothing</label>
+      <input type="range" id="smooth" min="0" max="0.95" step="0.05" value="0.90">
+      <span id="smooth-out">0.90</span>
+    </div>
+    <div class="ctrl">
+      <label for="bars">Bars</label>
+      <input type="range" id="bars" min="16" max="128" step="8" value="64">
+      <span id="bars-out">64</span>
+    </div>
+  </div>
+  <div id="canvas-wrap">
+    <canvas id="cv"></canvas>
+    <button id="fs-btn-overlay">⛶ Fullscreen</button>
+  </div>
+</div>
+
+<script>
+// ─── TUNEABLE CONSTANTS ──────────────────────────────────────────────────────
+
+// Background colour of the canvas (dark warm near-black)
+const BG_COLOR = '#1a1012';
+
+// In fullscreen: bars grow up from the vertical centre.
+// This ratio caps how tall they can get — 0.35 means 35% of screen height,
+// so the total band (above centre) is 35% of the screen. Raise to taste.
+const FULLSCREEN_MAX_BAR_RATIO = 0.35;
+
+// FFT size — higher = more frequency resolution, must be a power of 2.
+// 4096 gives 2048 frequency bins. Lower (e.g. 2048) is snappier but less detailed.
+const FFT_SIZE = 4096;
+
+// ─── ELEMENT REFERENCES ─────────────────────────────────────────────────────
+
+const btn       = document.getElementById('start-btn');
+const canvas    = document.getElementById('cv');
+const ctx2d     = canvas.getContext('2d');
+const wrap      = document.getElementById('canvas-wrap');
+
+const sensSlider   = document.getElementById('sens');
+const smoothSlider = document.getElementById('smooth');
+const barsSlider   = document.getElementById('bars');
+const sensOut      = document.getElementById('sens-out');
+const smoothOut    = document.getElementById('smooth-out');
+const barsOut      = document.getElementById('bars-out');
+
+// ─── SLIDER LABELS ──────────────────────────────────────────────────────────
+
+sensSlider.oninput = () => sensOut.textContent = parseFloat(sensSlider.value).toFixed(1) + '×';
+
+smoothSlider.oninput = () => {
+  smoothOut.textContent = parseFloat(smoothSlider.value).toFixed(2);
+  // Apply smoothing change live without restarting audio
+  if (analyser) analyser.smoothingTimeConstant = parseFloat(smoothSlider.value);
+};
+
+barsSlider.oninput = () => barsOut.textContent = barsSlider.value;
+
+// ─── FULLSCREEN ──────────────────────────────────────────────────────────────
+
+function isFullscreen() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+
+function goFullscreen() {
+  if (!isFullscreen()) {
+    (wrap.requestFullscreen || wrap.webkitRequestFullscreen).call(wrap);
+  } else {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  }
+}
+
+document.getElementById('fs-btn-overlay').onclick = goFullscreen;
+
+// ─── AUDIO STATE ─────────────────────────────────────────────────────────────
+
+let audioCtx, analyser, source, animId, running = false;
+
+// ─── CANVAS SIZING ───────────────────────────────────────────────────────────
+
+// Always match canvas pixel dimensions to its actual rendered size,
+// so drawing coordinates map 1:1 to screen pixels.
+function resizeCanvas() {
+  canvas.width  = wrap.offsetWidth;
+  canvas.height = isFullscreen() ? wrap.offsetHeight : 260; // 260px when embedded
+}
+
+document.addEventListener('fullscreenchange', resizeCanvas);
+document.addEventListener('webkitfullscreenchange', resizeCanvas);
+window.addEventListener('resize', resizeCanvas);
+
+// ─── DRAWING ─────────────────────────────────────────────────────────────────
+
+// dataArray: Uint8Array of frequency magnitudes (0–255), or null for idle state.
+function drawBars(dataArray) {
+  resizeCanvas();
+  const w = canvas.width;
+  const h = canvas.height;
+
+  // Fill background
+  ctx2d.fillStyle = BG_COLOR;
+  ctx2d.fillRect(0, 0, w, h);
+
+  const numBars   = dataArray ? parseInt(barsSlider.value) : 64;
+  const sensitivity = parseFloat(sensSlider.value);
+
+  // Gap between bars in pixels — shrink automatically when there are many bars
+  const gap  = numBars > 80 ? 2 : 3;
+  const barW = Math.max(1, (w - gap * (numBars - 1)) / numBars);
+
+  // Fullscreen: bars grow from vertical centre, capped by FULLSCREEN_MAX_BAR_RATIO.
+  // Embedded: bars grow from the bottom of the canvas.
+  const maxBarH = isFullscreen() ? h * FULLSCREEN_MAX_BAR_RATIO : h - 12;
+  const baseline = isFullscreen() ? h *0.65 : h;
+
+  const binCount = dataArray ? dataArray.length : 0;
+
+  for (let i = 0; i < numBars; i++) {
+
+    // ── Frequency mapping ──────────────────────────────────────────────────
+    // Map bar index → FFT bin range logarithmically.
+    // Log scale spreads bass frequencies across more bars (matching human hearing),
+    // instead of cramming them into the leftmost few bars like a linear map would.
+    let norm = 0;
+    if (dataArray) {
+      const tLo = i / numBars;
+      const tHi = (i + 1) / numBars;
+      const lo  = Math.floor(Math.pow(binCount, tLo) - 1);
+      const hi  = Math.ceil(Math.pow(binCount, tHi) - 1);
+
+      let sum = 0, count = 0;
+      for (let b = lo; b <= Math.min(hi, binCount - 1); b++) {
+        sum += dataArray[b];
+        count++;
+      }
+      const avg = count ? sum / count : 0;
+
+      // norm is 0–1: how loud this frequency band is, scaled by sensitivity
+      norm = Math.min((avg / 255) * sensitivity, 1);
+    }
+
+    // ── Bar geometry ───────────────────────────────────────────────────────
+    const bh = dataArray ? Math.max(4, norm * maxBarH) : 4; // min 4px so bars are always visible
+    const x  = i * (barW + gap);
+    const y  = baseline - bh; // bars grow upward from baseline
+
+    // ── Bar colour gradient ────────────────────────────────────────────────
+    // Top of bar → bottom of bar. Adjust these rgba values to change the colour scheme.
+    // First  stop: bright highlight at the peak (high energy = more opaque)
+    // Second stop: mid-tone body
+    // Third  stop: dark root where bar meets baseline
+    const grad = ctx2d.createLinearGradient(0, y, 0, baseline);
+    grad.addColorStop(0,   `rgba(240, 90, 70, ${0.5 + norm * 0.5})`);
+    grad.addColorStop(0.4, `rgba(180, 35, 35, ${0.6 + norm * 0.4})`);
+    grad.addColorStop(1,   `rgba(100, 15, 15, 0.8)`);
+    ctx2d.fillStyle = grad;
+
+    ctx2d.beginPath();
+    ctx2d.roundRect(x, y, barW, bh, Math.min(3, barW / 2)); // corner radius capped at half bar width
+    ctx2d.fill();
+
+    // ── Peak cap ──────────────────────────────────────────────────────────
+    // A bright thin strip at the very top of each bar for a subtle glow effect.
+    // Remove this block entirely if you don't want the highlight cap.
+    if (dataArray && norm > 0.05) {
+      ctx2d.fillStyle = `rgba(255, 140, 120, ${norm * 0.7})`;
+      ctx2d.beginPath();
+      ctx2d.roundRect(x, y, barW, Math.min(3, bh), Math.min(3, barW / 2));
+      ctx2d.fill();
+    }
+  }
+}
+
+// ─── ANIMATION LOOP ──────────────────────────────────────────────────────────
+
+function loop() {
+  if (!running) return;
+  const dataArray = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(dataArray); // fills dataArray with current frequency magnitudes
+  drawBars(dataArray);
+  animId = requestAnimationFrame(loop); // schedule next frame (~60fps)
+}
+
+// ─── START / STOP ────────────────────────────────────────────────────────────
+
+async function start() {
+  if (running) {
+    // Stop: tear down audio graph and reset UI
+    running = false;
+    cancelAnimationFrame(animId);
+    if (source) source.disconnect();
+    if (audioCtx) audioCtx.close();
+    btn.textContent = 'Start microphone';
+    btn.classList.remove('active');
+    drawBars(null);
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+    // Build the Web Audio graph: mic stream → analyser node (no output → no feedback)
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = FFT_SIZE;
+    analyser.smoothingTimeConstant = parseFloat(smoothSlider.value);
+    source = audioCtx.createMediaStreamSource(stream);
+    source.connect(analyser); // analyser is not connected to audioCtx.destination — intentional (no playback)
+
+    running = true;
+    btn.textContent = 'Stop microphone';
+    btn.classList.add('active');
+    loop();
+  } catch(e) {
+  }
+}
+
+btn.onclick = start;
+
+// Draw idle placeholder on load
+drawBars(null);
+</script>
