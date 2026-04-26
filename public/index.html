@@ -52,7 +52,7 @@ const BG_COLOR = '#1a1012';
 
 // In fullscreen: each half-bar is capped at this ratio of screen height.
 // 0.35 = bars reach up to 35% above and below centre. Raise to taste.
-const FULLSCREEN_MAX_BAR_RATIO = 0.50;
+const FULLSCREEN_MAX_BAR_RATIO = 0.90;
 
 // FFT size — higher = more frequency resolution, must be a power of 2.
 // 4096 gives 2048 frequency bins. Lower (e.g. 2048) is snappier but less detailed.
@@ -60,7 +60,7 @@ const FFT_SIZE = 4096;
 
 // Noise floor: frequency bins below this value (0–255) are treated as silence.
 // Raise to cut more background noise. 20–40 is subtle, 50+ is aggressive.
-const NOISE_FLOOR = 15;
+const NOISE_FLOOR = 30;
 
 // ─── ELEMENT REFERENCES ─────────────────────────────────────────────────────
 
