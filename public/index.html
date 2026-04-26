@@ -35,8 +35,8 @@
     </div>
     <div class="ctrl">
       <label for="bars">Bars</label>
-      <input type="range" id="bars" min="16" max="128" step="8" value="64">
-      <span id="bars-out">64</span>
+      <input type="range" id="bars" min="16" max="128" step="8" value="96">
+      <span id="bars-out">96</span>
     </div>
   </div>
   <div id="canvas-wrap">
@@ -54,7 +54,7 @@ const BG_COLOR = '#1a1012';
 // In fullscreen: bars grow up from the vertical centre.
 // This ratio caps how tall they can get — 0.35 means 35% of screen height,
 // so the total band (above centre) is 35% of the screen. Raise to taste.
-const FULLSCREEN_MAX_BAR_RATIO = 0.60;
+const FULLSCREEN_MAX_BAR_RATIO = 0.70;
 
 // FFT size — higher = more frequency resolution, must be a power of 2.
 // 4096 gives 2048 frequency bins. Lower (e.g. 2048) is snappier but less detailed.
@@ -140,8 +140,8 @@ function drawBars(dataArray) {
 
   // Fullscreen: bars grow from vertical centre, capped by FULLSCREEN_MAX_BAR_RATIO.
   // Embedded: bars grow from the bottom of the canvas.
-  const maxBarH = isFullscreen() ? h * FULLSCREEN_MAX_BAR_RATIO : h - 12;
-  const baseline = isFullscreen() ? h * 0.8 : h;
+  const maxBarH = isFullscreen() ? h * FULLSCREEN_MAX_BAR_RATIO / 2 : (h - 12) / 2;
+  const baseline = isFullscreen() ? h * 0.5 : h;
 
   const binCount = dataArray ? dataArray.length : 0;
 
@@ -165,37 +165,56 @@ function drawBars(dataArray) {
       }
       const avg = count ? sum / count : 0;
 
-      // norm is 0–1: how loud this frequency band is, scaled by sensitivity
-      norm = Math.min((avg / 255) * sensitivity, 1);
+      // Noise floor: any signal below this value (0–255) is treated as silence.
+      // Raise it to cut more background noise. 20–40 is a good range to try.
+      const NOISE_FLOOR = 45;
+
+      // Subtract the noise floor and rescale so the remaining range still fills 0–1.
+      // This means quiet background hiss stays flat while music pushes bars up clearly.
+      const signal = Math.max(0, avg - NOISE_FLOOR) / (255 - NOISE_FLOOR);
+      norm = Math.min(signal * sensitivity, 1);
     }
 
     // ── Bar geometry ───────────────────────────────────────────────────────
-    const bh = dataArray ? Math.max(4, norm * maxBarH) : 4; // min 4px so bars are always visible
-    const x  = i * (barW + gap);
-    const y  = baseline - bh; // bars grow upward from baseline
+    // halfH is how far the bar extends above AND below the centre line.
+    // Total bar height = halfH * 2.
+    const halfH = dataArray ? Math.max(2, norm * maxBarH) : 2;
+    const x     = i * (barW + gap);
+    const yTop  = baseline - halfH; // top edge (growing upward from centre)
+    const yBot  = baseline;         // bottom edge of upper half = centre line
 
     // ── Bar colour gradient ────────────────────────────────────────────────
-    // Top of bar → bottom of bar. Adjust these rgba values to change the colour scheme.
-    // First  stop: bright highlight at the peak (high energy = more opaque)
-    // Second stop: mid-tone body
-    // Third  stop: dark root where bar meets baseline
-    const grad = ctx2d.createLinearGradient(0, y, 0, baseline);
-    grad.addColorStop(0,   `rgba(240, 90, 70, ${0.5 + norm * 0.5})`);
-    grad.addColorStop(0.4, `rgba(180, 35, 35, ${0.6 + norm * 0.4})`);
-    grad.addColorStop(1,   `rgba(100, 15, 15, 0.8)`);
+    // Gradient runs from the outer tip (bright) to the centre (dark root).
+    // Applied once and used for both the upper and mirrored lower bar.
+    const grad = ctx2d.createLinearGradient(0, yTop, 0, baseline + halfH);
+    grad.addColorStop(0,   `rgba(240, 90, 70, ${0.5 + norm * 0.5})`); // bright tip (top)
+    grad.addColorStop(0.5, `rgba(100, 15, 15, 0.8)`);                 // dark root at centre
+    grad.addColorStop(1,   `rgba(240, 90, 70, ${0.5 + norm * 0.5})`); // bright tip (bottom, mirrored)
     ctx2d.fillStyle = grad;
 
+    // Draw upper half (centre → up)
     ctx2d.beginPath();
-    ctx2d.roundRect(x, y, barW, bh, Math.min(3, barW / 2)); // corner radius capped at half bar width
+    ctx2d.roundRect(x, yTop, barW, halfH, Math.min(3, barW / 2));
     ctx2d.fill();
 
-    // ── Peak cap ──────────────────────────────────────────────────────────
-    // A bright thin strip at the very top of each bar for a subtle glow effect.
-    // Remove this block entirely if you don't want the highlight cap.
+    // Draw lower half (centre → down) — mirror of upper
+    ctx2d.beginPath();
+    ctx2d.roundRect(x, baseline, barW, halfH, Math.min(3, barW / 2));
+    ctx2d.fill();
+
+    // ── Peak caps ─────────────────────────────────────────────────────────
+    // Bright thin strip at both tips (top and bottom) for a subtle glow effect.
+    // Remove this block entirely if you don't want the highlight caps.
     if (dataArray && norm > 0.05) {
+      const capH = Math.min(3, halfH);
       ctx2d.fillStyle = `rgba(255, 140, 120, ${norm * 0.7})`;
+      // Top cap
       ctx2d.beginPath();
-      ctx2d.roundRect(x, y, barW, Math.min(3, bh), Math.min(3, barW / 2));
+      ctx2d.roundRect(x, yTop, barW, capH, Math.min(3, barW / 2));
+      ctx2d.fill();
+      // Bottom cap
+      ctx2d.beginPath();
+      ctx2d.roundRect(x, baseline + halfH - capH, barW, capH, Math.min(3, barW / 2));
       ctx2d.fill();
     }
   }
