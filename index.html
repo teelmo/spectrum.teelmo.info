@@ -126,6 +126,9 @@ document.getElementById('fs-btn-overlay').onclick = goFullscreen;
 
 let audioCtx, analyser, source, animId, running = false;
 
+// Stores the current peak height (0–1) for each bar, for the falling peak indicators.
+let peaks = [];
+
 // ─── CANVAS SIZING ───────────────────────────────────────────────────────────
 
 function resizeCanvas() {
@@ -192,17 +195,7 @@ function drawBar(x, barW, baseline, maxBarH, norm) {
   ctx2d.roundRect(x, baseline, barW, halfH, radius);
   ctx2d.fill();
 
-  // Peak caps — bright thin strip at each tip
-  if (norm > 0.05) {
-    const capH = Math.min(3, halfH);
-    ctx2d.fillStyle = `rgba(255, 140, 120, ${norm * 0.7})`;
-    ctx2d.beginPath();
-    ctx2d.roundRect(x, yTop, barW, capH, radius);
-    ctx2d.fill();
-    ctx2d.beginPath();
-    ctx2d.roundRect(x, baseline + halfH - capH, barW, capH, radius);
-    ctx2d.fill();
-  }
+  
 }
 
 // ─── DRAWING ─────────────────────────────────────────────────────────────────
@@ -243,6 +236,42 @@ function drawBars(dataArray) {
     // Left side: bar i steps leftward from centre (mirror)
     const xLeft = centreX - (i + 1) * (barW + gap) + gap / 2;
     drawBar(xLeft, barW, baseline, maxBarH, norm);
+
+    // ── Falling peak indicators ────────────────────────────────────────────
+    // Peak snaps up instantly when norm exceeds it, then falls slowly each frame.
+    const PEAK_DROP_RATE = 0.008; // lower = slower fall. Try 0.008–0.02.
+    const PEAK_MIN_NORM  = 0.04;  // peaks below this are hidden at silence.
+
+    if (!peaks[i]) peaks[i] = 0;
+    if (norm > peaks[i]) {
+      peaks[i] = norm;                              // snap up instantly
+    } else {
+      peaks[i] = Math.max(0, peaks[i] - PEAK_DROP_RATE); // fall slowly
+    }
+
+    if (peaks[i] > PEAK_MIN_NORM) {
+      const peakH  = peaks[i] * maxBarH;
+      const capH   = 3;
+      const radius = Math.min(3, barW / 2);
+      ctx2d.fillStyle = `rgba(255, 140, 120, ${(norm + 0.2) * 1})`;
+      // ctx2d.fillStyle = `rgba(255, 180, 150, 0.9)`;
+      // Top cap — right side
+      ctx2d.beginPath();
+      ctx2d.roundRect(xRight, baseline - peakH - capH, barW, capH, radius);
+      ctx2d.fill();
+      // Bottom cap — right side (mirrored)
+      ctx2d.beginPath();
+      ctx2d.roundRect(xRight, baseline + peakH, barW, capH, radius);
+      ctx2d.fill();
+      // Top cap — left side
+      ctx2d.beginPath();
+      ctx2d.roundRect(xLeft, baseline - peakH - capH, barW, capH, radius);
+      ctx2d.fill();
+      // Bottom cap — left side (mirrored)
+      ctx2d.beginPath();
+      ctx2d.roundRect(xLeft, baseline + peakH, barW, capH, radius);
+      ctx2d.fill();
+    }
   }
 }
 
@@ -267,6 +296,7 @@ async function start() {
     btn.textContent = 'Start microphone';
     btn.classList.remove('active');
     drawBars(null);
+    peaks = [];
     return;
   }
 
