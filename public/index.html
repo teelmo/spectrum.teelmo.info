@@ -9,7 +9,6 @@
   .ctrl { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--color-text-secondary); }
   .ctrl input[type=range] { width: 200px; }
   .ctrl span { min-width: 32px; font-weight: 500; color: var(--color-text-primary); }
-  #status { font-size: 13px; color: var(--color-text-secondary); margin-bottom: 12px; min-height: 18px; }
   #canvas-wrap { position: relative; border-radius: var(--border-radius-md); overflow: hidden; background: #1a1012; }
   canvas { display: block; width: 100%; height: 600px; }
   #canvas-wrap:-webkit-full-screen { border-radius: 0; width: 100vw; height: 100vh; }
@@ -51,14 +50,17 @@
 // Background colour of the canvas (dark warm near-black)
 const BG_COLOR = '#1a1012';
 
-// In fullscreen: bars grow up from the vertical centre.
-// This ratio caps how tall they can get — 0.35 means 35% of screen height,
-// so the total band (above centre) is 35% of the screen. Raise to taste.
-const FULLSCREEN_MAX_BAR_RATIO = 0.70;
+// In fullscreen: each half-bar is capped at this ratio of screen height.
+// 0.35 = bars reach up to 35% above and below centre. Raise to taste.
+const FULLSCREEN_MAX_BAR_RATIO = 0.50;
 
 // FFT size — higher = more frequency resolution, must be a power of 2.
 // 4096 gives 2048 frequency bins. Lower (e.g. 2048) is snappier but less detailed.
 const FFT_SIZE = 4096;
+
+// Noise floor: frequency bins below this value (0–255) are treated as silence.
+// Raise to cut more background noise. 20–40 is subtle, 50+ is aggressive.
+const NOISE_FLOOR = 15;
 
 // ─── ELEMENT REFERENCES ─────────────────────────────────────────────────────
 
@@ -80,7 +82,6 @@ sensSlider.oninput = () => sensOut.textContent = parseFloat(sensSlider.value).to
 
 smoothSlider.oninput = () => {
   smoothOut.textContent = parseFloat(smoothSlider.value).toFixed(2);
-  // Apply smoothing change live without restarting audio
   if (analyser) analyser.smoothingTimeConstant = parseFloat(smoothSlider.value);
 };
 
@@ -108,115 +109,118 @@ let audioCtx, analyser, source, animId, running = false;
 
 // ─── CANVAS SIZING ───────────────────────────────────────────────────────────
 
-// Always match canvas pixel dimensions to its actual rendered size,
-// so drawing coordinates map 1:1 to screen pixels.
 function resizeCanvas() {
   canvas.width  = wrap.offsetWidth;
-  canvas.height = isFullscreen() ? wrap.offsetHeight : 260; // 260px when embedded
+  canvas.height = isFullscreen() ? wrap.offsetHeight : 600;
 }
 
 document.addEventListener('fullscreenchange', resizeCanvas);
 document.addEventListener('webkitfullscreenchange', resizeCanvas);
 window.addEventListener('resize', resizeCanvas);
 
+// ─── FREQUENCY → NORM ────────────────────────────────────────────────────────
+
+// Given a bar index (0 = bass, higher = treble) and the full FFT data array,
+// returns a normalised loudness value 0–1 for that frequency band.
+function getBarNorm(barIndex, numBars, dataArray, sensitivity) {
+  const binCount = dataArray.length;
+
+  // Logarithmic mapping: bar 0 covers the lowest frequencies,
+  // bar numBars-1 covers the highest. Log scale gives more bars to bass/mids.
+  const tLo = barIndex / numBars;
+  const tHi = (barIndex + 1) / numBars;
+  const lo  = Math.floor(Math.pow(binCount, tLo) - 1);
+  const hi  = Math.ceil(Math.pow(binCount, tHi) - 1);
+
+  let sum = 0, count = 0;
+  for (let b = lo; b <= Math.min(hi, binCount - 1); b++) {
+    sum += dataArray[b];
+    count++;
+  }
+  const avg = count ? sum / count : 0;
+
+  // Subtract noise floor, rescale remaining range to 0–1, apply sensitivity
+  const signal = Math.max(0, avg - NOISE_FLOOR) / (255 - NOISE_FLOOR);
+  return Math.min(signal * sensitivity, 1);
+}
+
+// ─── DRAW A SINGLE BAR ───────────────────────────────────────────────────────
+
+// Draws one vertical bar (growing up and down from baseline) at pixel position x.
+function drawBar(x, barW, baseline, maxBarH, norm) {
+  const halfH = Math.max(2, norm * maxBarH);
+  const yTop  = baseline - halfH;
+
+  // Gradient: bright tips fading to a dark root at the centre line
+  const grad = ctx2d.createLinearGradient(0, yTop, 0, baseline + halfH);
+  grad.addColorStop(0,   `rgba(240, 90, 70, ${0.5 + norm * 0.5})`); // bright top tip
+  grad.addColorStop(0.5, `rgba(100, 15, 15, 0.8)`);                 // dark centre root
+  grad.addColorStop(1,   `rgba(240, 90, 70, ${0.5 + norm * 0.5})`); // bright bottom tip
+  ctx2d.fillStyle = grad;
+
+  const radius = Math.min(3, barW / 2);
+
+  // Upper half
+  ctx2d.beginPath();
+  ctx2d.roundRect(x, yTop, barW, halfH, radius);
+  ctx2d.fill();
+
+  // Lower half (mirrored below baseline)
+  ctx2d.beginPath();
+  ctx2d.roundRect(x, baseline, barW, halfH, radius);
+  ctx2d.fill();
+
+  // Peak caps — bright thin strip at each tip
+  if (norm > 0.05) {
+    const capH = Math.min(3, halfH);
+    ctx2d.fillStyle = `rgba(255, 140, 120, ${norm * 0.7})`;
+    ctx2d.beginPath();
+    ctx2d.roundRect(x, yTop, barW, capH, radius);
+    ctx2d.fill();
+    ctx2d.beginPath();
+    ctx2d.roundRect(x, baseline + halfH - capH, barW, capH, radius);
+    ctx2d.fill();
+  }
+}
+
 // ─── DRAWING ─────────────────────────────────────────────────────────────────
 
-// dataArray: Uint8Array of frequency magnitudes (0–255), or null for idle state.
 function drawBars(dataArray) {
   resizeCanvas();
   const w = canvas.width;
   const h = canvas.height;
 
-  // Fill background
   ctx2d.fillStyle = BG_COLOR;
   ctx2d.fillRect(0, 0, w, h);
 
-  const numBars   = dataArray ? parseInt(barsSlider.value) : 64;
+  const numBars     = dataArray ? parseInt(barsSlider.value) : 64;
   const sensitivity = parseFloat(sensSlider.value);
+  const gap         = numBars > 80 ? 2 : 3;
+  const barW        = Math.max(1, (w - gap * (numBars - 1)) / numBars);
+  const maxBarH     = isFullscreen() ? h * FULLSCREEN_MAX_BAR_RATIO / 1.75 : (h - 12) / 2;
+  const baseline    = isFullscreen() ? h * 0.5 : h * 0.5;
 
-  // Gap between bars in pixels — shrink automatically when there are many bars
-  const gap  = numBars > 80 ? 2 : 3;
-  const barW = Math.max(1, (w - gap * (numBars - 1)) / numBars);
+  // ── Centred spectrum layout ──────────────────────────────────────────────
+  // Bar 0 (bass) sits in the horizontal centre of the canvas.
+  // Bars are then placed in pairs: one stepping left, one stepping right.
+  // This means the left half mirrors the right half, both going bass→treble outward.
+  //
+  // With an even numBars, the centre two bars share the middle.
+  // The total number of unique frequency bands drawn is still numBars.
 
-  // Fullscreen: bars grow from vertical centre, capped by FULLSCREEN_MAX_BAR_RATIO.
-  // Embedded: bars grow from the bottom of the canvas.
-  const maxBarH = isFullscreen() ? h * FULLSCREEN_MAX_BAR_RATIO / 2 : (h - 12) / 2;
-  const baseline = isFullscreen() ? h * 0.5 : h;
+  const half = Math.floor(numBars / 2);  // number of bars on each side
+  const centreX = w / 2;                 // horizontal centre of canvas
 
-  const binCount = dataArray ? dataArray.length : 0;
+  for (let i = 0; i < half; i++) {
+    const norm = dataArray ? getBarNorm(i, half, dataArray, sensitivity) : 0;
 
-  for (let i = 0; i < numBars; i++) {
+    // Right side: bar i steps rightward from centre
+    const xRight = centreX + i * (barW + gap) + gap / 2;
+    drawBar(xRight, barW, baseline, maxBarH, norm);
 
-    // ── Frequency mapping ──────────────────────────────────────────────────
-    // Map bar index → FFT bin range logarithmically.
-    // Log scale spreads bass frequencies across more bars (matching human hearing),
-    // instead of cramming them into the leftmost few bars like a linear map would.
-    let norm = 0;
-    if (dataArray) {
-      const tLo = i / numBars;
-      const tHi = (i + 1) / numBars;
-      const lo  = Math.floor(Math.pow(binCount, tLo) - 1);
-      const hi  = Math.ceil(Math.pow(binCount, tHi) - 1);
-
-      let sum = 0, count = 0;
-      for (let b = lo; b <= Math.min(hi, binCount - 1); b++) {
-        sum += dataArray[b];
-        count++;
-      }
-      const avg = count ? sum / count : 0;
-
-      // Noise floor: any signal below this value (0–255) is treated as silence.
-      // Raise it to cut more background noise. 20–40 is a good range to try.
-      const NOISE_FLOOR = 45;
-
-      // Subtract the noise floor and rescale so the remaining range still fills 0–1.
-      // This means quiet background hiss stays flat while music pushes bars up clearly.
-      const signal = Math.max(0, avg - NOISE_FLOOR) / (255 - NOISE_FLOOR);
-      norm = Math.min(signal * sensitivity, 1);
-    }
-
-    // ── Bar geometry ───────────────────────────────────────────────────────
-    // halfH is how far the bar extends above AND below the centre line.
-    // Total bar height = halfH * 2.
-    const halfH = dataArray ? Math.max(2, norm * maxBarH) : 2;
-    const x     = i * (barW + gap);
-    const yTop  = baseline - halfH; // top edge (growing upward from centre)
-    const yBot  = baseline;         // bottom edge of upper half = centre line
-
-    // ── Bar colour gradient ────────────────────────────────────────────────
-    // Gradient runs from the outer tip (bright) to the centre (dark root).
-    // Applied once and used for both the upper and mirrored lower bar.
-    const grad = ctx2d.createLinearGradient(0, yTop, 0, baseline + halfH);
-    grad.addColorStop(0,   `rgba(240, 90, 70, ${0.5 + norm * 0.5})`); // bright tip (top)
-    grad.addColorStop(0.5, `rgba(100, 15, 15, 0.8)`);                 // dark root at centre
-    grad.addColorStop(1,   `rgba(240, 90, 70, ${0.5 + norm * 0.5})`); // bright tip (bottom, mirrored)
-    ctx2d.fillStyle = grad;
-
-    // Draw upper half (centre → up)
-    ctx2d.beginPath();
-    ctx2d.roundRect(x, yTop, barW, halfH, Math.min(3, barW / 2));
-    ctx2d.fill();
-
-    // Draw lower half (centre → down) — mirror of upper
-    ctx2d.beginPath();
-    ctx2d.roundRect(x, baseline, barW, halfH, Math.min(3, barW / 2));
-    ctx2d.fill();
-
-    // ── Peak caps ─────────────────────────────────────────────────────────
-    // Bright thin strip at both tips (top and bottom) for a subtle glow effect.
-    // Remove this block entirely if you don't want the highlight caps.
-    if (dataArray && norm > 0.05) {
-      const capH = Math.min(3, halfH);
-      ctx2d.fillStyle = `rgba(255, 140, 120, ${norm * 0.7})`;
-      // Top cap
-      ctx2d.beginPath();
-      ctx2d.roundRect(x, yTop, barW, capH, Math.min(3, barW / 2));
-      ctx2d.fill();
-      // Bottom cap
-      ctx2d.beginPath();
-      ctx2d.roundRect(x, baseline + halfH - capH, barW, capH, Math.min(3, barW / 2));
-      ctx2d.fill();
-    }
+    // Left side: bar i steps leftward from centre (mirror)
+    const xLeft = centreX - (i + 1) * (barW + gap) + gap / 2;
+    drawBar(xLeft, barW, baseline, maxBarH, norm);
   }
 }
 
@@ -225,16 +229,15 @@ function drawBars(dataArray) {
 function loop() {
   if (!running) return;
   const dataArray = new Uint8Array(analyser.frequencyBinCount);
-  analyser.getByteFrequencyData(dataArray); // fills dataArray with current frequency magnitudes
+  analyser.getByteFrequencyData(dataArray);
   drawBars(dataArray);
-  animId = requestAnimationFrame(loop); // schedule next frame (~60fps)
+  animId = requestAnimationFrame(loop);
 }
 
 // ─── START / STOP ────────────────────────────────────────────────────────────
 
 async function start() {
   if (running) {
-    // Stop: tear down audio graph and reset UI
     running = false;
     cancelAnimationFrame(animId);
     if (source) source.disconnect();
@@ -247,25 +250,19 @@ async function start() {
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-
-    // Build the Web Audio graph: mic stream → analyser node (no output → no feedback)
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = FFT_SIZE;
     analyser.smoothingTimeConstant = parseFloat(smoothSlider.value);
     source = audioCtx.createMediaStreamSource(stream);
-    source.connect(analyser); // analyser is not connected to audioCtx.destination — intentional (no playback)
-
+    source.connect(analyser);
     running = true;
     btn.textContent = 'Stop microphone';
     btn.classList.add('active');
     loop();
-  } catch(e) {
-  }
+  } catch(e) {}
 }
 
 btn.onclick = start;
-
-// Draw idle placeholder on load
 drawBars(null);
 </script>
